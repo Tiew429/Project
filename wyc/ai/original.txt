@@ -1,0 +1,433 @@
+import __main__
+import subprocess
+
+from sympy import false, true
+
+# Check is gpu avaialble for processing
+def gpu_availability():
+    try:
+        import torch
+        if torch.cuda.is_available():
+            print("GPU is available. Using:", torch.cuda.get_device_name(0))
+            return True
+        else:
+            print("GPU is not available. Using CPU instead.")
+            return False
+    except ImportError:
+        try:
+            import tensorflow as tf
+            gpus = tf.config.list_physical_devices('GPU')
+            if gpus:
+                print("GPU is available. Using:", gpus[0].name)
+                return True
+            else:
+                print("GPU is not available. Using CPU instead.")
+                return False
+        except ImportError:
+            print("Neither PyTorch nor TensorFlow is installed. Cannot check GPU availability.")
+            return False
+
+# Define function to check packages availability
+def checkPackages():
+    print("\nChecking packages' availability")
+    
+    try:
+        import kagglehub
+    except ImportError:
+        print("Installing kagglehub...")
+        subprocess.check_call(['pip', 'install', 'kagglehub'])
+        try:
+            import kagglehub
+            print("kagglehub has been successfully installed")
+        except ImportError:
+            print("Failed to install kagglehub")
+            return false
+    
+    try:
+        import datasets
+    except ImportError:
+        print("Installing datasets...")
+        subprocess.check_call(['pip', 'install', 'datasets'])
+        try:
+            import datasets
+            print("datasets has been successfully installed")
+        except ImportError:
+            print("Failed to install datasets")
+            return false
+    
+    try:
+        import patoolib
+    except ImportError:
+        print("Installing patoolib...")
+        subprocess.check_call(['pip', 'install', 'patool'])
+        try:
+            import patoolib
+            print("patoolib has been successfully installed")
+        except ImportError:
+            print("Failed to install patoolib")
+            return false
+    
+    return true
+
+# Import necessary libraries
+import os
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+# Enable TensorFlow optimizations instead of disabling them
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+
+import kagglehub
+import numpy as np
+import matplotlib.pyplot as plt
+import cv2
+import calendar
+import time
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import ImageDataGenerator # type: ignore
+from tensorflow.keras.applications import ResNet50 # type: ignore
+from tensorflow.keras.models import Model # type: ignore
+from tensorflow.keras.layers import Dropout # type: ignore
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout # type: ignore
+from tensorflow.keras.optimizers import Adam # type: ignore
+from sklearn.utils import class_weight
+from sklearn.metrics import accuracy_score
+
+# Define function to download the food ingredients dataset
+def downloadIngredientsDataset():
+    print("\nDownloading ingredient dataset")
+    path = kagglehub.dataset_download("daffaff/ingredients-food-dataset")
+    print("Path to dataset files:", path)
+
+    dataset_path = os.path.join(path, "Dataset_ingredients")
+
+    # # Check if the dataset directory exists
+    # if not os.path.exists(dataset_path):
+    #     print("Error: Dataset directory not found!")
+    #     return None
+    
+    # # Explore the dataset directory structure
+    # print(f"\nCategories in dataset directory: {os.listdir(dataset_path)}")
+    
+    # # Count total number of files in all subfolders
+    # total_files = 0
+    # for root, dirs, files in os.walk(dataset_path):
+    #     total_files += len(files)
+    # print(f"\nTotal images in dataset: {total_files}")
+    
+    # # Analyze dataset content (categories and counts)
+    # print("\n=== Detailed Category Analysis ===")
+    # categories = {}
+    # max_count = 0
+    # min_count = float('inf')
+    # max_category = ""
+    # min_category = ""
+    
+    # for category in sorted(os.listdir(dataset_path)):
+    #     category_path = os.path.join(dataset_path, category)
+    #     if os.path.isdir(category_path):
+    #         num_images = len([f for f in os.listdir(category_path) if os.path.isfile(os.path.join(category_path, f))])
+    #         categories[category] = num_images
+    #         print(f"{category}: {num_images} images")
+            
+    #         # Track max and min categories
+    #         if num_images > max_count:
+    #             max_count = num_images
+    #             max_category = category
+    #         if num_images < min_count:
+    #             min_count = num_images
+    #             min_category = category
+    
+    # # Print summary statistics
+    # print(f"\nTotal categories: {len(categories)}")
+    # print(f"Category with most images: {max_category} ({max_count} images)")
+    # print(f"Category with fewest images: {min_category} ({min_count} images)")
+    # print(f"Average images per category: {total_files / len(categories):.1f}")
+            
+    # # Print some statistics about the categories
+    # categories_sorted = sorted(categories.items(), key=lambda x: x[1], reverse=True)
+    # print(f"\nTop 5 categories with most images:")
+    # for cat, count in categories_sorted[:5]:
+    #     print(f"  - {cat}: {count} images")
+        
+    # print(f"\nBottom 5 categories with least images:")
+    # for cat, count in categories_sorted[-5:]:
+    #     print(f"  - {cat}: {count} images")
+    
+    return dataset_path
+
+# For direct file processing
+def preprocess_image_from_path(image_path, target_size=(224, 224), filter_type="bilateral"):
+    try:
+        image = cv2.imread(image_path)
+        if image is None:
+            return None  # Skip if image can't be loaded
+
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # Convert to RGB
+
+        # Resize image to target size
+        image = cv2.resize(image, target_size)
+
+        # Apply noise removal based on selected filter
+        if filter_type == "gaussian":
+            image = cv2.GaussianBlur(image, (5, 5), 0)
+        elif filter_type == "median":
+            image = cv2.medianBlur(image, 5)
+        elif filter_type == "bilateral":
+            image = cv2.bilateralFilter(image, 9, 75, 75)  # Best for preserving edges
+
+        # Normalize pixel values to [0, 1]
+        image = image.astype(np.float32) / 255.0
+
+        return image
+    except Exception as e:
+        print(f"Error processing image {image_path}: {e}")
+        return None
+
+# For ImageDataGenerator
+def preprocess_for_model(image):
+    """Preprocessing function for ImageDataGenerator (receives image array)"""
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # Convert to RGB
+    # Apply noise removal
+    image = cv2.bilateralFilter(image, 9, 75, 75)
+    return image / 255.0  # Normalize
+
+# Define function to check the class distribution in train and validation sets
+def check_class_distribution(train_generator, val_generator):
+    # Get the class distributions
+    train_class_dist = np.bincount(train_generator.classes)
+    val_class_dist = np.bincount(val_generator.classes)
+
+    # Plotting the distributions
+    categories = list(train_generator.class_indices.keys())
+    
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # Training set distribution
+    axes[0].bar(categories, train_class_dist)
+    axes[0].set_title('Training Set Class Distribution')
+    axes[0].set_xticklabels(categories, rotation=90)
+    axes[0].set_xlabel('Classes')
+    axes[0].set_ylabel('Number of Samples')
+    
+    # Validation set distribution
+    axes[1].bar(categories, val_class_dist)
+    axes[1].set_title('Validation Set Class Distribution')
+    axes[1].set_xticklabels(categories, rotation=90)
+    axes[1].set_xlabel('Classes')
+    axes[1].set_ylabel('Number of Samples')
+    
+    plt.tight_layout()
+    plt.show()
+
+# Define function to create data generator
+def data_generator_and_model_training(dataset_path):
+    img_size = (224, 224)
+    batch_size = 32
+    datagen = ImageDataGenerator(validation_split=0.2, preprocessing_function=preprocess_for_model)
+
+    train_generator = datagen.flow_from_directory(
+        dataset_path,
+        target_size=img_size,
+        batch_size=batch_size,
+        class_mode='categorical',
+        subset='training'
+    )
+
+    val_generator = datagen.flow_from_directory(
+        dataset_path,
+        target_size=img_size,
+        batch_size=batch_size,
+        class_mode='categorical',
+        subset='validation'
+    )
+
+    # Compute class weights
+    class_weights = class_weight.compute_class_weight(
+        class_weight='balanced',
+        classes=np.unique(train_generator.classes),
+        y=train_generator.classes
+    )
+    class_weights_dict = dict(enumerate(class_weights))
+
+    return training(train_generator, val_generator)
+
+# Define function to create data generator
+def data_generator_and_model_training(dataset_path):
+    img_size = (224, 224)
+    batch_size = 32
+    datagen = ImageDataGenerator(validation_split=0.2, preprocessing_function=preprocess_for_model)
+
+    train_generator = datagen.flow_from_directory(
+        dataset_path,
+        target_size=img_size,
+        batch_size=batch_size,
+        class_mode='categorical',
+        subset='training'
+    )
+
+    val_generator = datagen.flow_from_directory(
+        dataset_path,
+        target_size=img_size,
+        batch_size=batch_size,
+        class_mode='categorical',
+        subset='validation'
+    )
+
+    # Check class distribution
+    check_class_distribution(train_generator, val_generator)
+
+    # Compute class weights
+    class_weights = class_weight.compute_class_weight(
+        class_weight='balanced',
+        classes=np.unique(train_generator.classes),
+        y=train_generator.classes
+    )
+    class_weights_dict = dict(enumerate(class_weights))
+
+    return training(train_generator, val_generator, class_weights_dict)
+
+# Update the training function to include class weights
+def training(train_generator, val_generator, class_weights_dict):
+    # Build model using ResNet50 as a feature extractor
+    base_model = ResNet50(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+    x = base_model.output
+    x = GlobalAveragePooling2D()(x)
+    x = Dense(128, activation='relu')(x)
+    x = Dropout(0.4)(x)
+    out = Dense(len(train_generator.class_indices), activation='softmax')(x)
+    model = Model(inputs=base_model.input, outputs=out)
+
+    # Freeze base model layers
+    for layer in base_model.layers[-100:]:
+        layer.trainable = True
+
+    # Compile model
+    model.compile(optimizer=Adam(learning_rate=0.0005), loss='categorical_crossentropy', metrics=['accuracy'])
+
+    # Train model with class weights
+    callbacks = [
+        tf.keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=3,
+            restore_best_weights=True
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.5,
+            patience=5
+        )
+    ]
+    history = model.fit(
+        train_generator, 
+        validation_data=val_generator, 
+        epochs=20,
+        class_weight=class_weights_dict,  # Include class weights
+        callbacks=callbacks
+    )
+
+    # Evaluate model
+    val_images, val_labels = next(iter(val_generator))
+    predictions = model.predict(val_images)
+    pred_labels = np.argmax(predictions, axis=1)
+    true_labels = np.argmax(val_labels, axis=1)
+    accuracy = accuracy_score(true_labels, pred_labels)
+    print(f"Validation Accuracy: {accuracy * 100:.2f}%")
+
+    # Save model
+    timestamp = calendar.timegm(time.gmtime())
+    model.save("/model/ai_model_" + str(timestamp) + ".keras")
+
+    return history
+
+# Define function to display plot history
+def plot_history_display(history):
+    # Plot accuracy
+    plt.figure(figsize=(12, 5))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(history.history['accuracy'], label='Train Accuracy')
+    plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    plt.title('Training & Validation Accuracy')
+
+    # Plot loss
+    plt.subplot(1, 2, 2)
+    plt.plot(history.history['loss'], label='Train Loss')
+    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.title('Training & Validation Loss')
+
+    plt.show()
+
+# For predict ingredients in image
+def predict_ingredients_in_image():
+    print()
+
+def troubleshoot_gpu():
+    """Provide troubleshooting information for GPU setup"""
+    print("\n===== GPU TROUBLESHOOTING =====")
+    
+    # Check TensorFlow version
+    print(f"TensorFlow version: {tf.__version__}")
+    
+    # Check if CUDA is installed and which version
+    try:
+        print(f"CUDA available: {tf.test.is_built_with_cuda()}")
+        print(f"GPU device name: {tf.test.gpu_device_name()}")
+    except:
+        print("Could not determine CUDA availability")
+    
+    # Show CUDA version from environment variables
+    cuda_version = os.environ.get('CUDA_VERSION', 'Not set')
+    print(f"CUDA version (env var): {cuda_version}")
+    
+    # Check available GPU memory
+    try:
+        import nvidia_smi # type: ignore
+        nvidia_smi.nvmlInit()
+        handle = nvidia_smi.nvmlDeviceGetHandleByIndex(0)
+        info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
+        print(f"GPU Memory: Total {info.total / 1024**3:.2f} GB, "
+              f"Free {info.free / 1024**3:.2f} GB, "
+              f"Used {info.used / 1024**3:.2f} GB")
+        nvidia_smi.nvmlShutdown()
+    except:
+        print("Could not query NVIDIA GPU memory info")
+    
+    print("=================================")
+
+# Main function
+if __name__ == '__main__':
+    gpu_availability()
+    troubleshoot_gpu()
+
+    if not checkPackages():
+        print("\nFailed to gain packages available...")
+        quit()
+    
+    dataset_path = downloadIngredientsDataset()
+    history = data_generator_and_model_training(dataset_path)
+
+    # while True:
+    #     print("\nFood Ingredient Model Trainer")
+    #     print("1. Train model")
+    #     print("2. Upload image and predict ingredient")
+    #     print("0. Exit")
+    #     choice = int(input("Enter an integer: "))
+
+    #     if (choice == 1):
+    #         if not checkPackages():
+    #             print("\nFailed to gain packages available...")
+    #             quit()
+            
+    #         dataset_path = downloadIngredientsDataset()
+    #         history = data_generator_and_model_training(dataset_path)
+    #         # plot_history_display(history)
+    #     elif choice == 2:
+    #         image_path = str(input("\nUpload your image path: "))
+    #     elif choice == 0:
+    #         print("\nExiting program......")
+    #         quit()
